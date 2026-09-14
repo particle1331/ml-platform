@@ -7,20 +7,10 @@ import os
 from celery import Celery
 
 
-def _setting(name: str, default: str) -> str:
-    return os.environ.get(name, default)
-
-
 app = Celery(
     "ml_platform",
-    broker=_setting(
-        "CELERY_BROKER_URL",
-        "amqp://platform:platform@localhost:5672//",
-    ),
-    backend=_setting(
-        "CELERY_RESULT_BACKEND",
-        "redis://localhost:6379/0",
-    ),
+    broker=os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0"),
+    backend=os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1"),
     include=["ml_platform.tasks"],
 )
 
