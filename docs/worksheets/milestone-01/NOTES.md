@@ -40,3 +40,10 @@ Record the commands actually run, observed results, explanations, and limitation
 - Result: HTTP 202 returned task ID `9bb2b617-fcd5-43c0-ba1e-f22aa1b4e95e`; `GET /tasks/{task_id}` returned `SUCCESS` with result `30`.
 - Explanation: The FastAPI producer publishes the allowlisted task name and JSON arguments; the worker executes it and Redis stores the result.
 - Limitations: This is an experimental task producer, not yet the durable PostgreSQL-backed job submission API.
+
+### Celery Beat experiment
+
+- Commands: `docker compose up -d beat`; `docker compose exec -T beat sh -c 'kill -9 1'`.
+- Result: Beat published `demo-add-every-30-seconds`; the worker consumed the scheduled `add(1, 1)` task. Killing Beat's main process caused Docker to restart the service with `restart: unless-stopped`.
+- Explanation: Beat uses the worker image but runs as its own single process and persists its schedule at `/data/celerybeat-schedule`.
+- Limitations: A manual `docker compose kill beat` leaves the service stopped by design; restart policies handle unexpected process exits, not deliberate operator stops. Flower does not provide a reliable Beat-instance count.

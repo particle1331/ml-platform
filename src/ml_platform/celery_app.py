@@ -16,12 +16,23 @@ app = Celery(
 
 app.conf.update(
     accept_content=["json"],
+    beat_schedule={
+        "demo-add-every-30-seconds": {
+            "task": "ml_platform.tasks.add",
+            "schedule": 5.0,
+            "args": (1, 1),
+            "options": {"queue": "beat"},
+        }
+    },
     enable_utc=True,
     result_expires=3600,
     result_serializer="json",
     task_serializer="json",
     task_send_sent_event=True,
     task_track_started=True,
+    task_acks_late=True,
     timezone="UTC",
+    worker_prefetch_multiplier=1,
     worker_send_task_events=True,
+    task_reject_on_worker_lost=True
 )
