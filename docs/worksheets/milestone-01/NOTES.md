@@ -25,6 +25,10 @@ Record the commands actually run, observed results, explanations, and limitation
 - Beat runs `count_pending` every five minutes, producing up to 288 result/event records per day and 864 over the three-day window.
 - Redis memory must be monitored as task volume or result size grows; expiration limits retention but does not cap the amount held during the window.
 
+## TODO
+
+- Expand the Celery unit and integration tests after the platform's final task list is defined.
+
 ## Checkpoints
 
 ### A — Plain job
