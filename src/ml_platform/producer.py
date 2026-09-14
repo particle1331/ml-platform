@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Literal
 
 from celery import Celery
-from celery.result import AsyncResult
 from fastapi import FastAPI, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from redis import Redis
 
+from ml_platform.constants import DEFAULT_QUEUE
+from ml_platform.task_events import get_task_events
 
 BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 
@@ -20,8 +21,35 @@ celery = Celery(
     broker=BROKER_URL,
     backend=os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1"),
 )
+celery.conf.update(
+    broker_transport_options={
+        "queue_order_strategy": "priority",
+        "priority_steps": list(range(10)),
+    },
+    task_default_queue=DEFAULT_QUEUE,
+)
 
-app = FastAPI(title="ML Platform Task Producer")
+app = FastAPI(
+    title="ML Platform Task Producer",
+    openapi_tags=[
+        {
+            "name": "Health",
+            "description": "Service health checks.",
+        },
+        {
+            "name": "Tasks",
+            "description": "Submit Celery tasks.",
+        },
+        {
+            "name": "Results",
+            "description": "Inspect task status and results.",
+        },
+        {
+            "name": "Control",
+            "description": "Inspect workers and control queued or running tasks.",
+        },
+    ],
+)
 
 
 class AddRequest(BaseModel):
@@ -35,12 +63,14 @@ class OneOverRequest(BaseModel):
 
 class WaitRequest(BaseModel):
     seconds: float = Field(ge=0, le=30)
+    priority: int | None = Field(default=None, ge=0, le=9)
 
 
 class SubmittedTask(BaseModel):
     task_id: str
-    task_name: str
-    status: str = "PENDING"
+
+
+TaskState = Literal["SUCCESS", "FAILURE", "REVOKED"]
 
 
 class ActiveTask(BaseModel):
@@ -67,54 +97,142 @@ class PendingTask(BaseModel):
     redelivered: bool | None = None
 
 
-@app.get("/health")
+@app.get("/health", tags=["Health"])
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def _submit(task_name: str, args: list[Any]) -> SubmittedTask:
+def _submit(
+    task_name: str,
+    args: list[Any],
+    *,
+    priority: int | None = None,
+) -> SubmittedTask:
     try:
-        result = celery.send_task(task_name, args=args)
+        result = celery.send_task(
+            task_name,
+            args=args,
+            queue=DEFAULT_QUEUE,
+            priority=priority,
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=503,
             detail="task broker unavailable",
         ) from exc
 
-    return SubmittedTask(task_id=result.id, task_name=task_name)
+    return SubmittedTask(task_id=result.id)
 
 
-@app.post("/tasks/add", status_code=202, response_model=SubmittedTask)
+@app.post("/tasks/add", status_code=202, response_model=SubmittedTask, tags=["Tasks"])
 def submit_add(request: AddRequest) -> SubmittedTask:
     """Enqueue the allowlisted addition task."""
     return _submit("ml_platform.tasks.add", [request.left, request.right])
 
 
-@app.post("/tasks/one-over", status_code=202, response_model=SubmittedTask)
+@app.post(
+    "/tasks/one-over",
+    status_code=202,
+    response_model=SubmittedTask,
+    tags=["Tasks"],
+)
 def submit_one_over(request: OneOverRequest) -> SubmittedTask:
     """Enqueue the reciprocal task."""
     return _submit("ml_platform.tasks.one_over", [request.value])
 
 
-@app.post("/tasks/wait", status_code=202, response_model=SubmittedTask)
+@app.post("/tasks/wait", status_code=202, response_model=SubmittedTask, tags=["Tasks"])
 def submit_wait(request: WaitRequest) -> SubmittedTask:
     """Enqueue the bounded wait task."""
-    return _submit("ml_platform.tasks.wait", [request.seconds])
+    return _submit(
+        "ml_platform.tasks.wait",
+        [request.seconds],
+        priority=request.priority,
+    )
 
 
-@app.get("/tasks/{task_id}")
-def task_status(task_id: str) -> dict[str, Any]:
-    """Read task state and, when available, its small result from Redis."""
-    result = AsyncResult(task_id, app=celery)
-    payload: dict[str, Any] = {"task_id": task_id, "status": result.state}
+def _task_payload(task_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+    """Build the result representation shared by single-task and list queries."""
+    state = meta["status"]
+    payload: dict[str, Any] = {"task_id": task_id, "status": state}
+    for field in ("name", "args", "kwargs", "worker", "retries", "queue", "date_done"):
+        if meta.get(field) is not None:
+            payload[field] = meta[field]
+    payload.update(get_task_events(task_id))
 
-    if result.ready():
-        if result.successful():
-            payload["result"] = result.result
-        else:
-            payload["error"] = str(result.result)
-
+    if state == "SUCCESS":
+        payload["result"] = meta["result"]
+    elif state in {"FAILURE", "REVOKED"}:
+        payload["error"] = str(meta["result"])
     return payload
+
+
+@app.get("/tasks", response_model=list[dict[str, Any]], tags=["Results"])
+def task_results(
+    name: str | None = None,
+    task_statuses: list[TaskState] | None = Query(default=None, alias="status"),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = Query(default=50, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    """Find terminal task results stored in the Redis result backend."""
+    start = _as_utc(start)
+    end = _as_utc(end)
+    if start and end and start > end:
+        raise HTTPException(status_code=400, detail="start must be before end")
+
+    wanted_states = set(task_statuses or ("SUCCESS", "FAILURE", "REVOKED"))
+    prefix = celery.backend.task_keyprefix
+    match = prefix + (b"*" if isinstance(prefix, bytes) else "*")
+    results: list[dict[str, Any]] = []
+
+    try:
+        for key in celery.backend.client.scan_iter(match=match):
+            task_id = key[len(prefix):].decode() if isinstance(key, bytes) else key[len(prefix):]
+            meta = celery.backend.get_task_meta(task_id)
+            if meta.get("status") not in wanted_states:
+                continue
+            if name is not None and meta.get("name") != name:
+                continue
+
+            date_done = _parse_utc(meta.get("date_done"))
+            if start and (date_done is None or date_done < start):
+                continue
+            if end and (date_done is None or date_done > end):
+                continue
+
+            results.append(_task_payload(task_id, meta))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Celery result backend unavailable",
+        ) from exc
+
+    results.sort(key=lambda result: result.get("date_done", ""), reverse=True)
+    return results[:limit]
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(value))
+    except ValueError:
+        return None
+
+
+@app.get("/tasks/{task_id}", tags=["Results"])
+def task_status(task_id: str) -> dict[str, Any]:
+    """Read the task result and worker metadata directly from Redis."""
+    return _task_payload(task_id, celery.backend.get_task_meta(task_id))
 
 
 def _inspect_workers():
@@ -133,7 +251,7 @@ def _worker_names() -> set[str]:
     return set(workers)
 
 
-@app.get("/active", response_model=list[ActiveTask])
+@app.get("/active", response_model=list[ActiveTask], tags=["Control"])
 def active_tasks() -> list[ActiveTask]:
     """Return tasks that workers report as currently executing."""
     try:
@@ -158,20 +276,6 @@ def active_tasks() -> list[ActiveTask]:
     return result
 
 
-def _pending_queue_keys(client: Redis[Any], queue: str) -> list[tuple[str, int | None]]:
-    """Find the base Redis queue and Celery's priority-suffixed queues."""
-    keys: list[tuple[str, int | None]] = [(queue, None)]
-    prefix = f"{queue}\x06\x16"
-    for key in client.scan_iter(match=f"{prefix}*"):
-        key_name = key.decode() if isinstance(key, bytes) else key
-        try:
-            priority = int(key_name.removeprefix(prefix))
-        except ValueError:
-            continue
-        keys.append((key_name, priority))
-    return keys
-
-
 def _pending_task(raw: bytes, queue: str, priority: int | None) -> PendingTask:
     """Extract stable Celery headers without exposing the serialized task body."""
     message = json.loads(raw)
@@ -189,34 +293,35 @@ def _pending_task(raw: bytes, queue: str, priority: int | None) -> PendingTask:
     )
 
 
-@app.get("/pending", response_model=list[PendingTask])
+@app.get("/pending", response_model=list[PendingTask], tags=["Control"])
 def pending_tasks(
-    queue: str = "celery",
+    queue: str = DEFAULT_QUEUE,
     limit: int = Query(default=50, ge=1, le=500),
 ) -> list[PendingTask]:
     """Return task headers still waiting in the Redis broker queue."""
-    client = Redis.from_url(BROKER_URL)
     try:
         pending: list[PendingTask] = []
-        for queue_key, priority in _pending_queue_keys(client, queue):
-            # Celery uses LPUSH/RPOP, so reverse Redis's newest-first list order.
-            for raw in reversed(client.lrange(queue_key, 0, -1)):
-                try:
-                    pending.append(_pending_task(raw, queue, priority))
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    # Do not make the monitoring endpoint fail because a broker
-                    # message uses an unexpected protocol or serializer.
-                    continue
-                if len(pending) >= limit:
-                    return pending
+        with celery.connection_for_read() as connection:
+            with connection.channel() as channel:
+                # Redis-specific Kombu internals keep priority keys in sync
+                # with the broker configuration, without scanning Redis.
+                for priority in channel.priority_steps:
+                    key = channel._q_for_pri(queue, priority)
+                    remaining = limit - len(pending)
+                    messages = channel.client.lrange(key, -remaining, -1)
+                    for raw in reversed(messages):
+                        try:
+                            pending.append(_pending_task(raw, queue, priority))
+                        except (AttributeError, TypeError, ValueError):
+                            continue
+                    if len(pending) >= limit:
+                        break
         return pending
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Celery broker unavailable",
         ) from exc
-    finally:
-        client.close()
 
 
 def _require_workers() -> None:
@@ -227,7 +332,7 @@ def _require_workers() -> None:
         )
 
 
-@app.post("/revoke/{task_id}")
+@app.post("/revoke/{task_id}", tags=["Control"])
 def revoke_task(task_id: str) -> dict[str, str]:
     """Ask workers to skip this task if it has not started yet."""
     _require_workers()
@@ -241,7 +346,7 @@ def revoke_task(task_id: str) -> dict[str, str]:
     return {"task_id": task_id, "message": f"Task {task_id} revoke requested."}
 
 
-@app.post("/abort/{task_id}")
+@app.post("/abort/{task_id}", tags=["Control"])
 def abort_task(task_id: str) -> dict[str, str]:
     """Ask a worker to terminate a task that is already running."""
     _require_workers()

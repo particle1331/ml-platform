@@ -1,0 +1,3 @@
+BEAT_QUEUE = "beat"
+DEFAULT_QUEUE = "default"
+TASK_RETENTION_SECONDS = 3 * 24 * 60 * 60

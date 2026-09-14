@@ -18,6 +18,13 @@ Record the commands actually run, observed results, explanations, and limitation
 - Use Flower as the operational UI for worker and task monitoring.
 - RabbitMQ is not part of the active local Compose stack.
 
+## Task result retention
+
+- `TASK_RETENTION_SECONDS = 259200` keeps Celery result records and task lifecycle event hashes for three days.
+- The value is shared by Celery's `result_expires` and the lifecycle event hash TTL, so both records expire together.
+- Beat runs `count_pending` every five minutes, producing up to 288 result/event records per day and 864 over the three-day window.
+- Redis memory must be monitored as task volume or result size grows; expiration limits retention but does not cap the amount held during the window.
+
 ## Checkpoints
 
 ### A — Plain job
