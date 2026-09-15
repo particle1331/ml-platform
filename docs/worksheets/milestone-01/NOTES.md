@@ -34,6 +34,17 @@ Record the commands actually run, observed results, explanations, and limitation
 - Beat runs `count_pending` every five minutes, producing up to 288 result/event records per day and 864 over the three-day window.
 - Redis memory must be monitored as task volume or result size grows; expiration limits retention but does not cap the amount held during the window.
 
+## MLflow and Azurite initialization
+
+- `azurite-init` is a one-shot Compose service. Its only job is to wait for
+  Azurite and create the `mlflow-artifacts` Blob container if it does not exist.
+- After the container is created, `azurite-init` exits successfully; it is not a
+  long-running application service, so `restart: "no"` is intentional.
+- MLflow depends on `azurite-init` completing successfully before it starts.
+- `./scripts/init_azurite.py:/scripts/init_azurite.py:ro` is a read-only host-file
+  bind mount for the initializer script. It is separate from the persistent
+  `azurite_data:/data` named volume that stores Azurite data.
+
 ## TODO
 
 - Expand the Celery unit and integration tests after the platform's final task list is defined.

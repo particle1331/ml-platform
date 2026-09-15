@@ -31,6 +31,22 @@ services:
       - azurite_data:/data
     restart: unless-stopped
 
+  azurite-init:
+    build:
+      context: .
+      dockerfile: docker/mlflow.Dockerfile
+    volumes:
+      - ./scripts/init_azurite.py:/scripts/init_azurite.py:ro
+    command:
+      - python
+      - /scripts/init_azurite.py
+    environment:
+      AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
+    depends_on:
+      azurite:
+        condition: service_started
+    restart: "no"
+
   mlflow:
     build:
       context: .
@@ -58,8 +74,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      azurite:
-        condition: service_started
+      azurite-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   redis:
