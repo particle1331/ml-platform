@@ -1,4 +1,65 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mlflow
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+    volumes:
+      - mlflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow -d mlflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    command:
+      - azurite-blob
+      - --blobHost
+      - 0.0.0.0
+      - --blobPort
+      - "10000"
+      - --location
+      - /data
+      - --skipApiVersionCheck
+    ports:
+      - "127.0.0.1:10000:10000"
+    volumes:
+      - azurite_data:/data
+    restart: unless-stopped
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: docker/mlflow.Dockerfile
+    command:
+      - mlflow
+      - server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --backend-store-uri
+      - postgresql://mlflow:mlflow@postgres:5432/mlflow
+      - --artifacts-destination
+      - wasbs://mlflow-artifacts@devstoreaccount1.blob.core.windows.net
+      - --serve-artifacts
+      - --allowed-hosts
+      - localhost:5000,127.0.0.1:5000,mlflow:5000
+    environment:
+      AZURE_STORAGE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
+    ports:
+      - "127.0.0.1:5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      azurite:
+        condition: service_started
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     ports:
@@ -108,7 +169,42 @@ services:
       redis:
         condition: service_healthy
 
+  kanchi:
+    image: getkanchi/kanchi:latest
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      DATABASE_URL: sqlite:////data/kanchi.db
+      LOG_LEVEL: INFO
+      DEVELOPMENT_MODE: "false"
+      ENABLE_PICKLE_SERIALIZATION: "false"
+      NUXT_PUBLIC_API_URL: ""
+      NUXT_PUBLIC_WS_URL: /ws
+      NUXT_PUBLIC_FRONTEND_URL: /ui
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - kanchi_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8765/api/health').read()",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
 volumes:
+  azurite_data:
   beat_data:
   flower_data:
+  kanchi_data:
+  mlflow_postgres_data:
   redis_data:

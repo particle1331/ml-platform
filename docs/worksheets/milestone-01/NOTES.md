@@ -13,14 +13,23 @@ Record the commands actually run, observed results, explanations, and limitation
 
 ## Local messaging decision
 
-- Use Redis as the Celery broker and result backend for this local experiment.
+- Commit to Redis as the Celery broker and result backend for the current platform.
 - Keep broker messages in Redis database 0 and task results in database 1.
 - Use Flower as the operational UI for worker and task monitoring.
-- RabbitMQ is not part of the active local Compose stack.
+- RabbitMQ and Azure Service Bus are not part of the active stack.
+- Treat a future broker migration as a major, explicit migration because current code
+  uses Redis-specific behavior, including queue inspection and priority handling.
+- Use one shared Celery/Redis deployment across environments, with environment-
+  namespaced queues such as `prod-default`, `prod-beat`, `staging-default`, and
+  `staging-beat`.
+- Name workers with the environment suffix, for example `worker-default.prod`,
+  `worker-beat.prod`, `worker-default.staging`, and `worker-beat.staging`.
+- Workers must consume only queues for their configured environment; queue prefixes
+  provide routing isolation without running a separate Celery server per environment.
 
 ## Task result retention
 
-- `TASK_RETENTION_SECONDS = 259200` keeps Celery result records and task lifecycle event hashes for three days.
+- `TASK_RETENTION_SECONDS = 259200` keeps Celery result records and task lifecycle event hashes for **three days**.
 - The value is shared by Celery's `result_expires` and the lifecycle event hash TTL, so both records expire together.
 - Beat runs `count_pending` every five minutes, producing up to 288 result/event records per day and 864 over the three-day window.
 - Redis memory must be monitored as task volume or result size grows; expiration limits retention but does not cap the amount held during the window.

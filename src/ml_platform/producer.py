@@ -151,20 +151,60 @@ def submit_wait(request: WaitRequest) -> SubmittedTask:
     )
 
 
-def _task_payload(task_id: str, meta: dict[str, Any]) -> dict[str, Any]:
-    """Build the result representation shared by single-task and list queries."""
+_TASK_METADATA_FIELDS = (
+    "name",
+    "args",
+    "kwargs",
+    "worker",
+    "retries",
+    "queue",
+    "date_done",
+)
+_TERMINAL_STATES = ("SUCCESS", "FAILURE", "REVOKED")
+
+
+def _task_record(task_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+    """Translate one Celery result into the API's task record."""
     state = meta["status"]
-    payload: dict[str, Any] = {"task_id": task_id, "status": state}
-    for field in ("name", "args", "kwargs", "worker", "retries", "queue", "date_done"):
-        if meta.get(field) is not None:
-            payload[field] = meta[field]
-    payload.update(get_task_events(task_id))
+    record = {
+        "task_id": task_id,
+        "status": state,
+        **{
+            field: meta[field]
+            for field in _TASK_METADATA_FIELDS
+            if meta.get(field) is not None
+        },
+        **get_task_events(task_id),
+    }
 
     if state == "SUCCESS":
-        payload["result"] = meta["result"]
-    elif state in {"FAILURE", "REVOKED"}:
-        payload["error"] = str(meta["result"])
-    return payload
+        record["result"] = meta["result"]
+    elif state in _TERMINAL_STATES[1:]:
+        record["error"] = str(meta["result"])
+
+    return record
+
+
+def _task_matches(
+    meta: dict[str, Any],
+    *,
+    required_states: set[str],
+    name: str | None,
+    start: datetime | None,
+    end: datetime | None,
+) -> bool:
+    """Return whether backend metadata satisfies the list query."""
+    if meta.get("status") not in required_states:
+        return False
+    if name is not None and meta.get("name") != name:
+        return False
+
+    date_done = _parse_utc(meta.get("date_done"))
+    if start and (date_done is None or date_done < start):
+        return False
+    if end and (date_done is None or date_done > end):
+        return False
+    return True
 
 
 @app.get("/tasks", response_model=list[dict[str, Any]], tags=["Results"])
@@ -176,12 +216,11 @@ def task_results(
     limit: int = Query(default=50, ge=1, le=500),
 ) -> list[dict[str, Any]]:
     """Find terminal task results stored in the Redis result backend."""
-    start = _as_utc(start)
-    end = _as_utc(end)
+    start, end = _as_utc(start), _as_utc(end)
     if start and end and start > end:
         raise HTTPException(status_code=400, detail="start must be before end")
 
-    wanted_states = set(task_statuses or ("SUCCESS", "FAILURE", "REVOKED"))
+    required_states = set(task_statuses or _TERMINAL_STATES)
     prefix = celery.backend.task_keyprefix
     match = prefix + (b"*" if isinstance(prefix, bytes) else "*")
     results: list[dict[str, Any]] = []
@@ -190,18 +229,16 @@ def task_results(
         for key in celery.backend.client.scan_iter(match=match):
             task_id = key[len(prefix):].decode() if isinstance(key, bytes) else key[len(prefix):]
             meta = celery.backend.get_task_meta(task_id)
-            if meta.get("status") not in wanted_states:
-                continue
-            if name is not None and meta.get("name") != name:
-                continue
-
-            date_done = _parse_utc(meta.get("date_done"))
-            if start and (date_done is None or date_done < start):
-                continue
-            if end and (date_done is None or date_done > end):
+            if not _task_matches(
+                meta,
+                required_states=required_states,
+                name=name,
+                start=start,
+                end=end,
+            ):
                 continue
 
-            results.append(_task_payload(task_id, meta))
+            results.append(_task_record(task_id, meta))
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -232,7 +269,8 @@ def _parse_utc(value: Any) -> datetime | None:
 @app.get("/tasks/{task_id}", tags=["Results"])
 def task_status(task_id: str) -> dict[str, Any]:
     """Read the task result and worker metadata directly from Redis."""
-    return _task_payload(task_id, celery.backend.get_task_meta(task_id))
+    meta = celery.backend.get_task_meta(task_id)
+    return _task_record(task_id, meta)
 
 
 def _inspect_workers():

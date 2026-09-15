@@ -4,7 +4,13 @@
 
 A local-first machine learning platform for a small team, centered on MLflow 3, Celery, FastAPI, and a Flet operations UI. Develop and exercise the system with Docker Compose, then deploy the same application images to Azure using Terraform.
 
-This document structures the initial proposal. It describes intended behavior and implementation milestones; the application and infrastructure have not been implemented yet. Azure Service Bus is the preferred cloud broker, subject to the compatibility checks below.
+This document structures the initial architecture proposal and milestone sequence. Parts of the local Celery/Redis producer experiment now exist; the durable orchestration and Azure architecture below remain targets, not implemented capabilities. The [milestone 1 notes](../worksheets/milestone-01/NOTES.md) record the current decision to use Redis as broker/result backend and shared environment-namespaced queues. The earlier Service Bus proposal below is historical context for a future explicit transport decision, not the active local stack.
+
+### Current observability proposal
+
+The [Flet observability UI and results API specification](observability-ui.md) describes the requested producer-hosted `/ui/`: Runs, Task types, and Monitoring, a code-configured environment selector, full error/traceback details, and linked manual retries. It is grounded in the current Redis implementation and identifies proposed API changes and their acceptance expectations. Flet is served by the producer, not a separate UI container.
+
+Preserve milestone 1's minimal table, counts and 24-hour histogram as the first UI checkpoint. Add the richer observability views incrementally; the six-milestone sequence and later schedule/batch/registry scope below remain unchanged. The new spec distinguishes current task-ID execution metrics from the future logical-job metrics and PostgreSQL catalog described here. It does not mark either implementation complete.
 
 The platform should support ad hoc tasks, batches of tasks, periodic execution, experiment tracking, model registration and promotion, and online inference. Start with a small internal team and CPU workers; job duration, GPU needs, concurrency, budget, and inference latency targets remain open sizing inputs.
 

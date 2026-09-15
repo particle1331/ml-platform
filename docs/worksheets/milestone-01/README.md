@@ -225,6 +225,8 @@ Record a job ID, run ID, model URI, output URI, and the command that reloads tha
 
 **F. Build the table, status counts, and 24-hour histogram.**
 
+**Current planning note:** the [producer-hosted observability specification](../../specs/observability-ui.md) adds the requested Runs, Task types and Monitoring views against the existing Redis experiment. Keep this module's minimal table/counts/histogram as the first UI checkpoint. The detailed interfaces below target the planned durable `Job` catalog; they are not the current `/tasks` API. When selecting implementation work, adapt the chosen module to the Redis task-ID contracts in that spec, including their distinct retry-counting rules, before writing code. Do not implement all expanded views merely to complete the minimal dashboard.
+
 Start with the arithmetic in plain Python, then expose it through FastAPI, then connect Flet. That gives the chart a testable meaning before it becomes a visual component. Use one server-generated `window_end` per refresh and define `window_start = window_end - 24 hours`. All intervals are half-open: start included, end excluded.
 
 Create a `GET /dashboard?page=1&page_size=25` endpoint. Read a consistent set of job records and derive all counts, bars, and rows from it. For this small milestone, one database query followed by a pure aggregation function is sufficient; optimizing aggregation in SQL can come after there is a measured need. Do not load only the requested table page before computing counts. Validate page >= 1 and page size between 1 and 100.

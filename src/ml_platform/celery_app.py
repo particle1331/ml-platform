@@ -24,9 +24,9 @@ app.conf.update(
         "priority_steps": list(range(10)),
     },
     beat_schedule={
-        "count-pending-every-5-seconds": {
+        "count-pending-every-5-minutes": {
             "task": "ml_platform.tasks.count_pending",
-            "schedule": 5 * 60.0,   # seconds
+            "schedule": 300.0,   # seconds
             "kwargs": {"queue": DEFAULT_QUEUE},
             "options": {"queue": BEAT_QUEUE},
         }
