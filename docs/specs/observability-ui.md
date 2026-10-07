@@ -2,7 +2,7 @@
 
 [Architecture and milestone sequence](README.md) · [Build worksheets](../worksheets/README.md)
 
-**Status: proposed specification, grounded in the current Redis experiment.** This document specifies documentation targets, not implemented features or completed checkpoints. It follows the requested Kanchi examples without importing its environment management, workflow editor, or configuration UI.
+**Status: proposed specification, grounded in the current Redis experiment.** This document specifies documentation targets, not implemented features or completed checkpoints. It follows the supplied monitoring screenshots without importing their environment management, workflow editor, or configuration UI.
 
 ## 1. Outcome and scope
 
@@ -128,7 +128,7 @@ Use native Flet charts for the initial bars/line. Plotly is an optional renderer
 
 ## 4. Results API contract
 
-Keep the existing route vocabulary. Add five routes and extend two; avoid copying Kanchi's registry/session/config/event APIs.
+Keep the existing route vocabulary. Add five routes and extend two; avoid copying the reference tool's registry/session/config/event APIs.
 
 | Route | Contract |
 | --- | --- |

@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+import flet.fastapi as flet_fastapi
 from celery import Celery
 from fastapi import FastAPI, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from ml_platform.constants import DEFAULT_QUEUE
 from ml_platform.task_events import get_task_events
+from ml_platform.ui import main as ui_main
 
 BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 
@@ -29,8 +32,17 @@ celery.conf.update(
     task_default_queue=DEFAULT_QUEUE,
 )
 
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Start and stop Flet's session background tasks with uvicorn."""
+    await flet_fastapi.app_manager.start()
+    yield
+    await flet_fastapi.app_manager.shutdown()
+
+
 app = FastAPI(
     title="ML Platform Task Producer",
+    lifespan=_lifespan,
     openapi_tags=[
         {
             "name": "Health",
@@ -83,6 +95,15 @@ class ActiveTask(BaseModel):
     worker: str | None = None
     priority: int | None = None
     redelivered: bool | None = None
+
+
+class WorkerStatus(BaseModel):
+    """A worker that replied to the latest control inspection."""
+
+    hostname: str
+    status: Literal["online"] = "online"
+    active_count: int = 0
+    observed_at: datetime
 
 
 class PendingTask(BaseModel):
@@ -213,7 +234,9 @@ def task_results(
     task_statuses: list[TaskState] | None = Query(default=None, alias="status"),
     start: datetime | None = None,
     end: datetime | None = None,
-    limit: int = Query(default=50, ge=1, le=500),
+    # The UI reads the whole retained window per refresh; the ceiling keeps
+    # one request bounded without forcing artificial pagination on callers.
+    limit: int = Query(default=50, ge=1, le=2000),
 ) -> list[dict[str, Any]]:
     """Find terminal task results stored in the Redis result backend."""
     start, end = _as_utc(start), _as_utc(end)
@@ -287,6 +310,34 @@ def _worker_names() -> set[str]:
             detail="Celery workers unavailable",
         ) from exc
     return set(workers)
+
+
+@app.get("/workers", response_model=list[WorkerStatus], tags=["Control"])
+def workers() -> list[WorkerStatus]:
+    """Report responding workers and their observed active task counts.
+
+    A worker appears here as long as it replies to the inspection ping, even
+    when it is idle. Workers that do not reply are absent, not reported dead.
+    """
+    try:
+        inspector = _inspect_workers()
+        ping = inspector.ping() or {}
+        active = inspector.active() or {}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Celery workers unavailable",
+        ) from exc
+
+    observed_at = datetime.now(timezone.utc)
+    return [
+        WorkerStatus(
+            hostname=hostname,
+            active_count=len(active.get(hostname) or []),
+            observed_at=observed_at,
+        )
+        for hostname in sorted(ping)
+    ]
 
 
 @app.get("/active", response_model=list[ActiveTask], tags=["Control"])
@@ -396,3 +447,9 @@ def abort_task(task_id: str) -> dict[str, str]:
             detail="Task abort failed",
         ) from exc
     return {"task_id": task_id, "message": f"Task {task_id} abort requested."}
+
+
+# The Flet observability UI is served under /ui/ alongside the API, /docs and
+# /health. It talks to this same API over HTTP and holds no broker or Redis
+# credentials of its own.
+app.mount("/ui", flet_fastapi.app(ui_main))

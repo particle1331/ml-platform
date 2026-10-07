@@ -159,12 +159,15 @@ services:
       - uvicorn
       - ml_platform.producer:app
       - --host=0.0.0.0
-      - --port=8000
+      - --port=18000
     environment:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      # The /ui Flet app reads the producer's own HTTP API from inside the
+      # container, where uvicorn listens on 18000.
+      ML_PLATFORM_API_URL: http://127.0.0.1:18000
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:18000:18000"
     depends_on:
       redis:
         condition: service_healthy
@@ -187,42 +190,9 @@ services:
       redis:
         condition: service_healthy
 
-  kanchi:
-    image: getkanchi/kanchi:latest
-    environment:
-      CELERY_BROKER_URL: redis://redis:6379/0
-      DATABASE_URL: sqlite:////data/kanchi.db
-      LOG_LEVEL: INFO
-      DEVELOPMENT_MODE: "false"
-      ENABLE_PICKLE_SERIALIZATION: "false"
-      NUXT_PUBLIC_API_URL: ""
-      NUXT_PUBLIC_WS_URL: /ws
-      NUXT_PUBLIC_FRONTEND_URL: /ui
-    ports:
-      - "127.0.0.1:8765:8765"
-    volumes:
-      - kanchi_data:/data
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8765/api/health').read()",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
 volumes:
   azurite_data:
   beat_data:
   flower_data:
-  kanchi_data:
   mlflow_postgres_data:
   redis_data:

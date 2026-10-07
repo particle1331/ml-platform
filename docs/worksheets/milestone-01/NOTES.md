@@ -78,3 +78,53 @@ Record the commands actually run, observed results, explanations, and limitation
 - Result: Beat published `demo-add-every-30-seconds`; the worker consumed the scheduled `add(1, 1)` task. Killing Beat's main process caused Docker to restart the service with `restart: unless-stopped`.
 - Explanation: Beat uses the worker image but runs as its own single process and persists its schedule at `/data/celerybeat-schedule`.
 - Limitations: A manual `docker compose kill beat` leaves the service stopped by design; restart policies handle unexpected process exits, not deliberate operator stops. Flower does not provide a reliable Beat-instance count.
+
+### Flet monitoring UI replica (Dashboard and Task Registry)
+
+Replicates the reference monitoring screenshots (Dashboard tab with workers panel, failed-tasks
+panel and runs table; Tasks tab with registry cards) in Flet, served at `/ui`
+inside the producer. Built over the existing task-record schema; the only API
+additions are the read-only `GET /workers` route and a wider `/tasks` `limit`
+ceiling. Files: `src/ml_platform/ui.py`, `ui_state.py`, `ui_api.py`.
+
+- Commands:
+  - `uv add flet==1.0.3 httpx>=0.27,<1`
+  - `uv run pytest tests/unit -q` → **37 passed** (`test_ui_state.py`,
+    `test_ui_api.py`, `test_workers_api.py`, `test_ui_mount.py`, plus the
+    existing `test_tasks.py` unchanged and green)
+  - `ML_PLATFORM_API_URL=http://127.0.0.1:8010 uv run uvicorn ml_platform.producer:app --port 8010`
+    against the Compose Redis; `curl /health`, `/workers` (2 workers, both
+    `online`, idle), `/tasks`, `/ui/` (200, Flet client), `/docs`
+  - Headless-browser screenshots of all three tabs plus interactions: row
+    expansion, search typing across a polling tick, selection, failure-window
+    pills. Captured renders are visual evidence only, not test assertions.
+- Result: Both pages match the screenshots (worker cards, failed-tasks empty
+  state, runs table with relative/absolute times and status pills, registry
+  cards with 24h activity bars and EXEC/OK/FAIL/RETRY/AVG). Live data only:
+  values come from the producer HTTP API every five seconds. Search keeps focus
+  across refreshes; expanded rows show the raw record fields.
+- Explanation: The UI reads only the producer's HTTP API (no broker/Redis
+  credentials). `ui_state.py` is a pure presenter (formatting, window buckets,
+  filtering, pagination) so widgets never compute counts; `ui_api.py` fetches
+  sections concurrently and keeps partial results when one endpoint fails
+  (worker outage does not erase task rows). Data regions are rebuilt as
+  registered "boxes" while text inputs are built once per view, so polling
+  cannot steal input focus.
+- Limitations:
+  - Integration tests (`tests/integration`) were not run for this checkpoint.
+    The producer image is now the single host: rebuilt with `flet[web]==1.0.3`
+    (the `flet-web` distribution is an extra, not a core dependency) plus
+    `httpx`, with `compose.yaml` setting `ML_PLATFORM_API_URL=http://127.0.0.1:18000`,
+    and verified serving `/ui/` with live data at `127.0.0.1:18000`.
+  - Worker "Rate" is a recent-completion count from retained results, not a
+    broker throughput measurement; worker "last seen" is the inspection time of
+    the current poll. Workers that stop replying disappear rather than show
+    stale last-seen state.
+  - Rerun/Review buttons and tags are rendered but deliberately disabled:
+    retry and registry tags are later spec modules. Workflows is a placeholder.
+  - Registry card ordering is most-recent-first (then name), not the
+    reference screenshots' ordering. Unknown values render as `—`. Task Registry types are
+    code-configured in `constants.TASK_REGISTRY`.
+  - Retention is three days of result-backend records; totals are exact for
+    that retained window (fetched capped at 2000 records per refresh), not
+    all-time counts.
